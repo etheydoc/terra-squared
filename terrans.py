@@ -1,318 +1,175 @@
 # Definition of the Terrans, the animal inhabitants of Terra^2.
-# Ethan Block, 9-3-2018
+# Ethan Block, 10-3-2018
+
+from numba import jit
+from util import Struct
+import world, util
 
 import numpy as np
 import random
-import util
 
-from numba import jit
+class Terran(Struct):
+    """The struct that contains variables controlling
+       the behavior of a Terran, a single animal inhabitant
+       of Terra^2."""
+    x = 0
+    y = 0
+    health = 1.0
+    energy = 1.0
+    social = 1.0
+    rogue = False
+    infected = False
+    temprange = (0.0, 1.0)
+    w_climate = 1.0 # how much the Terran cares about climate
+    w_vegetation = 1.0 # how much the Terran cares about vegetation
 
 class TerranPop:
 
-    # This class defines an entire population of Terrans (3D array), since defining each one as its own object is too computationally costly.
-    def __init__(self, size, pop_size, tmap, dist=1, decay=0.05, sex_th=0.2, decay_health=0.1, decay_social=0.005, temprange=(0.25, 0.75),
-                 d_harm=0.2, d_spread=2, w_r=1):
-        # size = size of landscape array
-        # pop_size = max population size
-        # tmap = terrainmap object
-        # dist = randomized distance from centroid
-        # decay = terran energy decay rate
-        # sex_th = energy threshold for pops to reproduce
-        # decay_health = health decay rate for weak terrans
-        # decay_social = terran social decay rate
-        # temprange = survivable temperature range
-        # d_harm = damage done to diseased terran per update
-        # d_spread = distance a disease can spread
-        # w_r = terran weather resistance
+    def __init__(self, terrain, weather, num_terrans, spawn_dist=2, temprange=(0.0, 1.0), decay=0.1, decay_h=0.25, decay_soc=0.005, sex_th=0.4):
+        """The class that defines a population of Terrans and
+           controls their behavior.
 
-        ''' Terrans are stored in this structure:
-            [ x coordinate, y coordinate, health value, energy value, social value, resources, rogue, infected, livable temp range ]'''
+           Keyword arguments:
+           terrain -- the world object these Terrans inhabit.
+           weather --  the weather controller of the world.
+           num_terrans -- the initial number of Terrans in this population.
+           spawn_dist -- the maximum distance from the spawn point a Terran may be placed.
+           temprange -- the range of survivable temperatures for the initial Terrans in this population.
+           decay -- the decay rate of an individual's energy.
+           decay_h -- the decay rate of an individual's health when exhausted.
+           decay_soc -- the decay rate of a Terran's social need.
+           sex_th -- the energy threshold required for two Terrans to reproduce.
+           """
 
-        pop = [self.newpop(temprange) for x in range(pop_size)]
-
-        # generate above-water coordinates for terrans
-        centroid = (0,0)
-        while tmap.tmap[centroid] <= 0.5:
-            centroid = (random.randint(0, size-1), random.randint(0, size-1))
-
-        for i in range(pop_size):
-            pop[i][0] = centroid[0] + random.randint(-dist, dist)
-
-            pop[i][1] = centroid[1] + random.randint(-dist, dist)
-
-        self.size = size
-        self.pop = pop
-        self.tmap = tmap
-        self.decay = decay
-        self.sex_th = sex_th
-        self.decay_health = decay_health
-        self.decay_social = decay_social
         self.temprange = temprange
-        self.d_harm = d_harm
-        self.d_spread = d_spread
-        self.w_r = w_r
+        self.decay = decay
+        self.decay_h = decay_h
+        self.decay_soc = decay_soc
+        self.sex_th = sex_th
 
-    def newpop(self, temprange):
-        return [0, 0, 1.0, 1.0, 1.0, 0.0, False, False, temprange]
+        spawn_point = (int(terrain.size/2), int(terrain.size/2))
+        while (terrain.climates[spawn_point] < temprange[0] or
+               terrain.climates[spawn_point] > temprange[1] or
+               terrain.heightmap[spawn_point] <= terrain.water_level or
+               terrain.vegetation[spawn_point] < np.max(terrain.vegetation)/2):
 
-    @jit
-    def get_terrans_in_range(self, coords, radius):
-        terran_ids = []
-        for terran in self.pop:
-            if util.eudist(coords, (terran[0], terran[1])) < radius:
-                terran_ids.append(self.pop.index(terran))
-        return terran_ids
+               spawn_point = (random.randint(0, terrain.size-1), random.randint(0, terrain.size-1))
 
-    @jit
-    def get_terran_at_coords(self, coords):
-        for terran in self.pop:
-            if terran[0] == coords[0] and terran[1] == coords[1]:
-                return terran
-        return None
+        self.terrain = terrain
+        self.weather = weather
+        self.gradient_c = util.get_gradient(world.proc_smooth(terrain.climates, 3) - abs((temprange[1] - temprange[0])/2))
+        for x in range(self.terrain.size):
+            for y in range(self.terrain.size):
+                self.gradient_c[x,y] = util.normalize(self.gradient_c[x,y])
 
-    def kill_terran(self, terran):
-        for t in self.pop:
-            if t == terran:
-                self.pop.pop(t)
-                break
+        self.terrans = [Terran(x=(spawn_point[0] + random.randint(-spawn_dist, spawn_dist)),
+                        y=(spawn_point[1] + random.randint(-spawn_dist, spawn_dist)),
+                        temprange=temprange) for x in range(num_terrans)]
+        self.terran_coords = np.array(self.get_positions()[1])
 
-    @jit
+    #@jit
     def get_positions(self):
-        pmap = np.zeros((self.size, self.size))
+        pmap = np.zeros((self.terrain.size, self.terrain.size))
         coords = []
-        for i in range(len(self.pop)):
-            pmap[int(self.pop[i][0]), int(self.pop[i][1])] = 1.0
-            coords.append([int(self.pop[i][0]), int(self.pop[i][1])])
+        for terran in self.terrans:
+            pmap[terran.x, terran.y] = 1.0
+            coords.append((terran.x, terran.y))
         return pmap, coords
 
-    @jit
-    def find_closest_terran(self, coords):
-        best = 99999
-        best_index = -1
+    #@jit
+    def get_closest_terran(self, coords):
+        best = None
+        best_dist = 99999
 
-        for i in range(len(self.pop)):
-            dist = util.eudist(coords, (self.pop[i][0], self.pop[i][1]))
-            if dist < best:
-                best = dist
-                best_index = i
+        for i in range(len(self.terran_coords)):
+            dist = util.eudist(coords, self.terran_coords[i])
+            if dist < best_dist:
+                best = self.terrans[i]
+                best_dist = dist
 
-        return self.pop[best_index]
+        return best, best_dist
 
-    @jit
-    def find_furthest_terran(self, coords):
-        best = 0
-        best_index = -1
+    def manage_terrans(self):
+        newpops = []
+        for terran in self.terrans:
+            if terran.energy < 1.0:
+                # consume sustenance
+                if self.terrain.sustenance[terran.x, terran.y] > 0:
+                    self.terrain.sustenance[terran.x, terran.y] -= self.decay*2
+                    terran.energy += self.decay*2
 
-        for i in range(len(self.pop)):
-            dist = util.eudist(coords, (self.pop[i][0], self.pop[i][1]))
-            if dist > best:
-                best = dist
-                best_index = i
+            # damage weak terrans
+            if terran.energy <= 0.0:
+                terran.health -= self.decay_h
 
-        return self.pop[best_index]
-
-    @jit
-    def path(self, dest, area=None):
-        best = 99999
-        best_index = -1
-
-        if area is None:
-            area = [[terran[0]-1, terran[1]-1], [terran[0], terran[1]-1], [terran[0]+1, terran[1]-1],
-                      [terran[0]-1, terran[1]], [terran[0]+1, terran[1]], [terran[0]-1, terran[1]+1],
-                      [terran[0], terran[1]+1], [terran[0]+1, terran[1]+1]]
-
-            # wrap area around map
-            for i in range(len(area)):
-                for j in range(2):
-                    if area[i][j] < 0:
-                        area[i][j] = self.size - area[i][j]
-                    if area[i][j] >= self.size:
-                        area[i][j] = area[i][j] - self.size
-
-        for i in range(len(area)):
-            dist = util.eudist(area[i], dest)
-            if dist < best:
-                best = dist
-                best_index = i
-
-        return area[best_index]
-
-    @jit
-    def path_away(self, ndest, area=None):
-        best = 0
-        best_index = -1
-
-        if area is None:
-            area = [[terran[0]-1, terran[1]-1], [terran[0], terran[1]-1], [terran[0]+1, terran[1]-1],
-                      [terran[0]-1, terran[1]], [terran[0]+1, terran[1]], [terran[0]-1, terran[1]+1],
-                      [terran[0], terran[1]+1], [terran[0]+1, terran[1]+1]]
-
-            # wrap area around map
-            for i in range(len(area)):
-                for j in range(2):
-                    if area[i][j] < 0:
-                        area[i][j] = self.size - area[i][j]
-                    if area[i][j] >= self.size:
-                        area[i][j] = area[i][j] - self.size
-
-        for i in range(len(area)):
-            dist = util.eudist(area[i], ndest)
-            if dist > best:
-                best = dist
-                best_index = i
-
-        return area[best_index]
-
-    @jit
-    def get_centroid(self):
-        coords = [0,0]
-        for terran in self.pop:
-            coords[0] += terran[0]
-            coords[1] += terran[1]
-        coords[0] /= len(self.pop)
-        coords[1] /= len(self.pop)
-        return coords
-
-    @jit
-    def get_diseased(self):
-        num = 0
-        for terran in self.pop:
-            if terran[7] == True:
-                num += 1
-        return num
-
-    def update(self):
-        #print(len(self.pop))
-        to_remove = []
-        for terran in self.pop:
-            tc = (int(terran[0]), int(terran[1]))
-            # calculate terran coords (line-of-sight)
-            coords = [[terran[0]-1, terran[1]-1], [terran[0], terran[1]-1], [terran[0]+1, terran[1]-1],
-                      [terran[0]-1, terran[1]], [terran[0]+1, terran[1]], [terran[0]-1, terran[1]+1],
-                      [terran[0], terran[1]+1], [terran[0]+1, terran[1]+1]]
-
-            # wrap coords around map
-            for i in range(len(coords)):
-                for j in range(2):
-                    #print(coords[i][j])
-                    if coords[i][j] < 0:
-                        coords[i][j] = self.size - coords[i][j]
-                    if coords[i][j] >= self.size:
-                        coords[i][j] = coords[i][j] - self.size
-
-            # get closest terran
-            closest = self.find_closest_terran(tc)
-            cdist = util.eudist((terran[0], terran[1]), (closest[0], closest[1]))
-
-            # reproduction logic (woohoo)
-            if terran[3] > self.sex_th:
-                if closest[3] > self.sex_th:
-                    # subtract energies from terrans
-                    terran[3] -= self.sex_th
-                    closest[3] -= self.sex_th
-                    # create new terran
-                    child = self.newpop(self.temprange)
-                    child[0] = terran[0]
-                    child[1] = closest[1]
-                    self.pop.append(child)
-
-            # if on resources and don't have enough, gather them
-            if self.tmap.rmap[tc] > 0.1 and terran[5] < 1:
-                self.tmap.rmap[tc] -= 0.1
-                terran[5] += 0.1
-
-            # social logic
-            if terran[4] < 0.5 and cdist > 2:
-                terran[2] -= self.decay
-                closest = self.find_closest_terran(tc)
-                new_coords = self.path((closest[0], closest[1]), area=coords)
-                terran[0] = new_coords[0]
-                terran[1] = new_coords[1]
-
-            if cdist <= 2:
-                terran[4] += self.decay_social
-            else:
-                # decrement isolated terrans' social level
-                terran[4] -= self.decay_social
-
-            # contagion logic
-            if terran[7] == True:
-                if cdist <= self.d_spread:
-                    closest[7] = True
-
-            if terran[4] > 0.5:
-                # move away from closest terran and go explore
-                new_coords = self.path_away((closest[0], closest[1]), area=coords)
-
-            if self.tmap.smap[tc[0], tc[1]] <= 0.1:
-                # decrement all terrans' energy
-                terran[3] -= self.decay
-
-            # look for terrans with low energy
-            if terran[2] < 0.5:
-                # if on vegetation, feed
-                if self.tmap.smap[tc[0], tc[1]] > 0.1:
-                    terran[2] += self.decay
-                    self.tmap.smap[tc[0], tc[1]] -= 0.1
-                # otherwise, seek vegetation
-                else:
-                    # check vegetation gradient
-                    best = -1
-                    coords_best = coords[0]
-                    for i in range(len(coords)):
-                        grad = self.tmap.smap[int(coords[i][0]), int(coords[i][1])] - self.tmap.smap[tc[0], tc[1]]
-                        if grad > best:
-                            best = grad
-                            coords_best = (coords[i][0], coords[i][1])
-
-                    # update terran position
-                    if best > 0:
-                        terran[0] = coords_best[0]
-                        terran[1] = coords_best[1]
-
-                    # construction logic
-
-
-
-            # decrement weak terrans' health
-            if terran[3] <= 0:
-                #print('weak damage')
-                terran[2] -= self.decay_health
-
-            # heal strong terrans
-            elif terran[3] > 0.5 and terran[2] < 1:
-                terran[2] += self.decay_health
+            # damage terrans in storm
+            if self.weather.weathermap[terran.x, terran.y] > 0:
+                terran.health -= self.weather.weathermap[terran.x, terran.y]
 
             # remove dead terrans
-            if terran[2] <= 0:
-                to_remove.append(self.pop.index(terran))
+            if terran.health > 0.0:
+                newpops.append(terran)
 
-            # damage drowning terrans
-            if self.tmap.tmap[terran[0], terran[1]] <= 0.3:
-                #print('drowning damage')
-                terran[2] -= 0.1
+            # social and reproduction logic (woohoo)
+            closest, closest_dist = self.get_closest_terran([terran.x, terran.y])
+            if closest_dist <= 2:
+                terran.social += self.decay_soc
+                if closest.energy > self.sex_th and terran.energy > self.sex_th:
+                    self.terrans.append(Terran(x=terran.x, y=closest.y, temprange=self.temprange))
+                    closest.energy -= self.sex_th
+                    terran.energy -= self.sex_th
+            else:
+                terran.social -= self.decay_soc
 
-            # damage terrans in bad climates
-            if (self.tmap.cmap[terran[0], terran[1]] < terran[8][0] or
-                self.tmap.cmap[terran[0], terran[1]] > terran[8][1]):
-                #print(self.tmap.cmap[terran[0], terran[1]])
-                #print('climate damage')
-                terran[2] -= 0.1
+            if terran.social <= 0.0:
+                terran.energy -= self.decay_h
 
-            # damage terrans in storms
-            if (self.tmap.wmap[terran[0], terran[1]] > self.w_r):
-                # print(self.tmap.wmap[terran[0], terran[1]])
-                #print('storm damage')
-                terran[2] -= self.tmap.wmap[terran[0], terran[1]]
+            terran.energy -= self.decay
 
-            # damage diseased terrans
-            if (terran[7] == True):
-                #print('disease damage')
-                terran[2] -= self.d_harm
+        self.terrans = newpops
 
-        # remove terrans
-        newpop = []
-        for i in range(len(self.pop)):
-            if i not in to_remove:
-                newpop.append(self.pop[i])
-        self.pop = newpop
+    def move_terrans(self):
+        self.terran_coords = np.array(self.get_positions()[1])
+        # TODO: calculate area gradients for each terran, move accordingly
+        for terran in self.terrans:
+            txy = np.array([terran.x, terran.y])
+            closest = self.get_closest_terran(txy)[0]
+            closest_coords = (closest.x ,closest.y)
+            area = util.get_area(txy, self.terrain.size)
+            grad = np.zeros(9)
+
+            for i in range(len(area)):
+                g_sust = self.terrain.sustenance[area[i][0], area[i][1]] - self.terrain.sustenance[txy[0], txy[1]]
+                g_cli = np.average(self.gradient_c[area[i][0], area[i][1]]) - self.gradient_c[txy[0], txy[1]][4]
+                grad[i] = (g_sust + g_cli) / 2
+
+            dest = area[grad.tolist().index(max(grad))]
+            dest = np.asarray(dest)
+
+            if terran.social < 0.2:
+                dest_soc = util.path(closest_coords, area)
+                dest = (dest + dest_soc) / 2
+            elif terran.social > 0.8:
+                dest_soc = util.path_away(closest_coords, area)
+                dest = (dest + dest_soc) / 2
+
+            if len(self.weather.storms) > 0:
+                if self.weather.weathermap[txy[0], txy[1]] > 0:
+                    storm = self.weather.get_closest_storm(txy)[0][0]
+                    g_storm = util.path_away(storm, area)
+                    dest = (dest + g_storm) / 2
+
+            dest = np.ndarray.astype(np.asarray(dest), 'int32')
+
+            # find a spot near destination that isn't occupied or below sea level
+            dest_area = util.get_area(dest, self.terrain.size)
+            for i in range(len(dest_area)):
+                if dest_area[i] not in self.terran_coords:
+                    if self.terrain.heightmap[dest_area[i][0], dest_area[i][1]] > self.terrain.water_level:
+                        terran.x = dest[0]
+                        terran.y = dest[1]
+                        break
+
+    def update(self):
+        self.move_terrans()
+        self.manage_terrans()

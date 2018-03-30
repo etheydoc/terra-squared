@@ -1,132 +1,198 @@
-# Definition of terrain altitude & vegetation map, and procedural generation algo
+# Definition of terrain map (and its many layers) and procedural generation algo
 # Ethan Block, 9-3-2018
 
 import numpy as np
 import scipy as sp
 import scipy.ndimage
 
+from numba import jit
 import random
 import util
 
-from numba import jit
+@jit
+def proc_gen(size, points, sigma):
+    """Generate a square map of smoothed random points.
 
-import matplotlib.pyplot as pl
+       Keyword arguments:
+       size -- the size of the map (final map will be size squared)
+       points -- the number of maximum points on the map. The higher this is, the higher the average value will be.
+       sigma -- factor that determines how much the points are smoothed.
+       """
+    generated = np.zeros((size, size))
+    gpoints = np.random.choice(range(0, size * size), size=int(points))
+    for i in gpoints:
+        generated[int(i / size), int(i % size)] = 1.0
+    generated = proc_smooth(generated, sigma)
+    generated = util.normalize(generated)
+    return generated
 
-class TerrainMap:
+@jit
+def proc_smooth(map1, sigma):
+    generated = sp.ndimage.filters.gaussian_filter(map1, [sigma, sigma], mode='constant')
+    return generated
 
-    def __init__(self, size, density, v_t=0.2, v_m=1, sigma=3, v_rate=0.01, r_rate=0.005, c_int=0.8, c_sint=0.05, vbounds=(0.2, 0.6),
-                 w_int=1, w_decay=0.1, w_sc=0.1, w_sbounds=(0.4, 1.2)):
-        # size = terrain map size
-        # density = % of map that is land, essentially
-        # v_t = vegetation thickness
-        # sigma = smoothing factor
-        # v_rate = vegetation regrowth rate
-        # r_rate = resource regrowth rate
-        # c_int = climate intensity %
-        # c_sint = climate spawn intensity %
-        # vbounds = min/max temperature for vegetation to grow in
-        # w_int = weather intensity
-        # w_decay = weather storm decay rate
-        # w_sc = weather storm spawn chance
-        # w_sbounds = min/max weather storm intensity %
+@jit
+def proc_filter(map1, map2, threshold):
+    if type(threshold) == tuple:
+        map1[np.where(map2 < threshold[0])] = 0.0
+        map1[np.where(map2 > threshold[1])] = 0.0
+    else:
+        map1[np.where(map2 <= threshold)] = 0.0
+    return map1
 
-        points = int(density*(size**2))
+class Terrain:
 
-        tmap = np.zeros((size, size))
-        tpoints = np.random.choice(range(0, size * size), size=points)
-        for i in tpoints:
-            tmap[int(i / size), int(i % size)] = 1.0
+    def __init__(self, size, points=None, sigma=4, num_climates=10, v_sparsity=0.02, v_bounds=(0.2, 0.8), water_level=0.5,
+                 s_rate=0.05):
+        """A terrain object, which contains all information about the simulated world.
 
-        tmap = sp.ndimage.filters.gaussian_filter(tmap, [sigma, sigma], mode='constant')
-        tmap = util.normalize(tmap, np.min(tmap), np.max(tmap))
-
-        vmap = np.zeros((size, size))
-        vpoints = np.random.choice(range(0, size * size), size=int(points*v_t))
-        for i in vpoints:
-            vmap[int(i / size), int(i % size)] = v_m
-        vmap = sp.ndimage.filters.gaussian_filter(vmap, [sigma, sigma], mode='constant')
-
-        rmap = np.zeros((size, size))
-        rpoints = np.random.choice(range(0, size * size), size=int(points*v_t))
-        for i in vpoints:
-            rmap[int(i / size), int(i % size)] = 1.0
-        rmap = sp.ndimage.filters.gaussian_filter(rmap, [sigma/2, sigma/2], mode='constant')
-
-        # generate random climates and overlay the north & south pole on top & bottom
-        cmap = np.zeros((size, size))
-        cpoints = np.random.choice(range(0, size * size), size=int(points*c_sint))
-        for i in cpoints:
-            cmap[int(i / size), int(i % size)] = random.random()
-        cmap[0:int(size/8)] = [0.0] * size
-        cmap[-int(size/8):-1] = [0.0] * size
-        cmap = sp.ndimage.filters.gaussian_filter(cmap, [sigma*2, sigma*2], mode='constant')
-        cmap = util.normalize(cmap, np.min(cmap), np.max(cmap))
-        # print(np.max(cmap))
-
-        # weather map - tracks storms and stuff
-        self.wmap = np.zeros((size, size))
-
-        # masking - remove vegetation below water level and in cold/hot areas
-        for x in range(size):
-            for y in range(size):
-                if tmap[x][y] <= 0.5:
-                    vmap[x][y] = 0
-                else:
-                    #cval = cmap[x][y] - 0.5
-                    cval = cmap[x][y]
-                    #print(cval)
-                    if cval > vbounds[0] and cval < vbounds[1]:
-                        vmap[x][y] *= cval
-
-        vmap = util.normalize(vmap, np.min(vmap), np.max(vmap))
-        rmap = util.normalize(rmap, np.min(rmap), np.max(rmap))
+           Keyword arguments:
+           size -- the size of the terrain.
+           points -- the number of maximum points on the map in procedural generation.
+           sigma -- smoothing factor for procedural generation.
+           num_climates -- the number of climates in the terrain.
+           v_sparsity -- the vegetation sparsity (as percent of the total map space).
+           v_bounds -- the minimum and maximum climate values (temperatures) that vegetation can grow in.
+           water_level -- the level of water on the map.
+           s_rate -- the rate at which consumed vegetation (sustenance) is regrown.
+           """
 
         self.size = size
         self.sigma = sigma
-        self.tmap = tmap
-        self.vmap = vmap
-        self.smap = np.copy(vmap) # sustenance map
-        self.rmap = rmap
-        self.cmap = cmap
-        self.v_rate = v_rate
-        self.r_rate = r_rate
-        self.w_int = w_int
-        self.w_decay = w_decay
-        self.w_sc = w_sc
-        self.w_sbounds = w_sbounds
+        self.v_sparsity = v_sparsity
+        self.v_bounds = v_bounds
+        self.water_level = water_level
+        self.s_rate = s_rate
 
-    def update_weather(self):
-        wmap = self.wmap.T
-        cached = wmap[-1]
-        wmap = util.shift(wmap, 1, fill_value=cached).T
+        if points is None:
+            points = random.randint(size*10, size*20)
 
-        wmap -= (wmap * self.w_decay)
+        self.points = points
 
-        # spawn storm
-        if random.random() < self.w_sc:
-            nwmap = np.zeros((self.size, self.size))
-            wpoints = np.random.choice(range(0, self.size * self.size), size=1)
-            for i in wpoints:
-                nwmap[int(i / self.size), int(i % self.size)] = 1.0
-            nwmap = sp.ndimage.filters.gaussian_filter(nwmap, [self.sigma, self.sigma], mode='constant')
-            nwmap *= self.w_int * random.uniform(self.w_sbounds[0], self.w_sbounds[1])
-            nwmap = util.normalize(nwmap, 0, np.max(nwmap))
-            wmap += nwmap
+        # generate the heightmap
+        heightmap = proc_gen(size, points, sigma)
+        self.heightmap = heightmap
 
-        #if np.max(wmap) > 0:
-            #wmap = util.normalize(wmap, np.min(wmap), np.max(wmap))
+        climates = proc_gen(size, num_climates, sigma)*4
 
+        # here we set the polar regions to freezing
+        climates[0:int(size/4)] = 0.0
+        climates[-int(size/4):-1] = 0.0
+        climates = proc_smooth(climates, sigma*4)
+        climates = util.normalize(climates, bounds=(v_bounds[0]*0.75, v_bounds[1]*1.25))
+        self.climates = climates
+        self.gradient_c = util.get_gradient(climates)
 
-        #print(np.min(wmap), np.max(wmap))# debug
-        self.wmap = wmap
+        # spawn vegetation seeds across the map, but not in water or unsuitable climates
 
-    @jit
+        vegetation = np.zeros((size, size))
+
+        for i in range(int(points * v_sparsity)):
+            veg_seed = (0, 0)
+
+            while (climates[veg_seed] < v_bounds[0] or
+                   climates[veg_seed] > v_bounds[1] or
+                   heightmap[veg_seed] < water_level):
+                   veg_seed = (random.randint(0, size-1), random.randint(0, size-1))
+
+            vegetation[veg_seed] = 1.0
+
+        vegetation = proc_smooth(vegetation, sigma/2)
+        self.vegetation = proc_filter(vegetation, heightmap, water_level)
+        self.sustenance = np.copy(vegetation) # we want changes to the vegetation to affect sustenance map
+
+    def update(self):
+        """Master update function for the terrain map."""
+        self.grow_vegetation()
+
     def grow_vegetation(self):
-        for x in range(self.size):
-            for y in range(self.size):
-                if self.rmap[x,y] > 0:
-                    if self.smap[x,y] < self.vmap[x,y]:
-                        self.smap[x,y] = min(self.smap[x,y]+self.v_rate, self.vmap[x,y])
-                    # grow resources
-                    if self.rmap[x,y] < 1:
-                        self.rmap[x,y] = min(self.rmap[x,y]+self.r_rate, 1)
+        """Grow vegetation on the terrain map."""
+        new_vegetation = proc_gen(self.size, int(self.points*self.v_sparsity), 0)
+        new_vegetation = proc_filter(new_vegetation, self.climates, self.v_bounds)
+        new_vegetation = proc_filter(new_vegetation, self.heightmap, self.water_level+0.2)
+        new_vegetation = proc_smooth(new_vegetation, self.sigma/2)
+        new_vegetation = proc_filter(new_vegetation, self.heightmap, self.water_level)
+        self.vegetation += new_vegetation
+        self.vegetation[np.where(self.vegetation > 1.0)] = 1.0
+
+        # regrow consumed vegetation
+        self.sustenance[np.where((self.sustenance > 0.1) & (self.sustenance < self.vegetation))] += self.s_rate
+
+class Weather:
+
+    def __init__(self, size, storm_chance, storm_size, storm_int, storm_decay, storm_var=(0.75, 1.25), storm_speed=1.0, sigma=2):
+        """A weather object, which controls the appearance and movement
+           of storms in the simulation.
+
+           Keyword arguments:
+           size -- the size of the map.
+           storm_chance -- the percent chance a storm will form.
+           storm_size -- the average size of a newly formed storm.
+           storm_int -- the intensity (damage per second) of a storm.
+           storm_decay -- the percent speed at which a storm decays.
+           storm_var -- the min/max variance of a storm's size.
+           storm_speed -- the average speed of a newly formed storm.
+           sigma -- the smoothing factor.
+           """
+
+        self.size = size
+        self.storm_chance = storm_chance
+        self.storm_size = storm_size
+        self.storm_int = storm_int
+        self.storm_decay = storm_decay
+        self.storm_var = storm_var
+        self.storm_speed = storm_speed
+        self.sigma = sigma
+        self.weathermap = np.zeros((size, size))
+        self.storms = [] # storms are stored in the format [location, velocity, strength]
+
+    def update(self):
+        """Master update function for the weather map."""
+        self.weathermap = np.zeros((self.size, self.size))
+
+        # update storms & add them to map
+        if(len(self.storms) > 0):
+            new_storms = []
+            for i in range(len(self.storms)):
+                self.storms[i][0][0] += self.storms[i][1][0]
+                self.storms[i][0][1] += self.storms[i][1][1]
+
+                # wrap storms around map
+                if self.storms[i][0][0] >= self.size:
+                    self.storms[i][0][0] = 0
+                if self.storms[i][0][1] >= self.size:
+                    self.storms[i][0][1] = 0
+
+                if self.storms[i][0][0] < 0:
+                    self.storms[i][0][0] = self.size - 1
+                if self.storms[i][0][1] < 0:
+                    self.storms[i][0][1] = self.size - 1
+
+                self.storms[i][2] *= (1 - self.storm_decay)
+                if self.storms[i][2] > 0.1:
+                    new_storms.append(self.storms[i])
+                self.weathermap[int(self.storms[i][0][0]), int(self.storms[i][0][1])] = self.storms[i][2]
+
+
+            self.storms = new_storms
+            self.weathermap = proc_smooth(self.weathermap, self.sigma)
+            self.weathermap = util.mask(self.weathermap, np.average(self.weathermap)*1.2)
+
+
+        if random.random() < self.storm_chance:
+            # generate random position vector for storm
+            coords = [random.randint(0, self.size-1), random.randint(0, self.size-1)]
+            # generate random movement vector for storm
+            direction = [random.uniform(-self.storm_speed, self.storm_speed), random.uniform(-self.storm_speed, self.storm_speed)]
+            self.storms.append([coords, direction, 1.0])
+
+    #@jit
+    def get_closest_storm(self, coords):
+        best_dist = self.size**2
+        best = None
+        for storm in self.storms:
+            dist = util.eudist(storm[0], coords)
+            if dist < best_dist:
+                best_dist = dist
+                best = storm
+        return best, best_dist
