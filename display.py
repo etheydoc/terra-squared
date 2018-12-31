@@ -25,13 +25,17 @@ def terrain_to_surf(tr, scale):
 
 class TSQDisplay:
 
-    def __init__(self, world, res=(1280, 720), cmap=[[0.5, [0.1,0.3,0.4]], [0.6, [0.5,0.5,0.2]], [0.8, [0.3,0.4,0.1]], [0.9,[0.3,0.3,0.25]], [1.1,[0.5, 0.5,0.55]]]):
+    def __init__(self, world, res=(1280, 720), cmap=None, tradius=8):
+        if cmap is None:
+            cmap = [[world.wlev, [0.1,0.3,0.4]], [0.6, [0.5,0.5,0.2]], [0.8, [0.3,0.4,0.1]], [0.9,[0.3,0.3,0.25]], [1.1,[0.5, 0.5,0.55]]]
+
         pygame.init()
         pygame.display.set_caption("Terra^2")
         self.screen = pygame.display.set_mode(res)
         self.world = world
         self.res = res
         self.cmap = cmap
+        self.tradius = tradius
         # build colored terrain map
         self.terrain_img = np.zeros((self.world.terrain.shape[0], self.world.terrain.shape[1], 3))
         for x in range(self.world.terrain.shape[0]):
@@ -43,6 +47,11 @@ class TSQDisplay:
 
     def render(self, terrans):
         sf = terrain_to_surf(self.terrain_img, self.res[1])
+        for i in range(len(terrans)):
+            for terran in terrans[i].terrans:
+                rel = ((terran.x+1)/self.world.size[0]*self.res[0], (terran.y+1)/self.world.size[1]*self.res[1])
+                sf.fill(pygame.color.THECOLORS['purple'], rect=[max(rel[0]-self.tradius, 0), max(rel[1]-self.tradius,0), self.tradius, self.tradius])
+        pygame.transform.rotate(sf, -90)
         self.screen.blit(sf, (0,0))
         pygame.display.flip()
 

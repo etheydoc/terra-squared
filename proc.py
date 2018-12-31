@@ -10,6 +10,7 @@ import scipy as sp
 import scipy.ndimage
 import random
 import util
+import cv2
 
 def gen_climates(size, num_climates=3, sigma=3):
     climates = np.zeros((size, size))
@@ -20,7 +21,7 @@ def gen_climates(size, num_climates=3, sigma=3):
 def gen_terrain(size, seed=0, sigma=3):
     lin = np.linspace(0,size,endpoint=False)
     x,y = np.meshgrid(lin,lin)
-    return smooth(perlin(x,y,seed=seed), sigma=sigma)
+    return cv2.resize(smooth(perlin(x,y,seed=seed), sigma=sigma), dsize=(size,size), interpolation=cv2.INTER_NEAREST)
 
 def smooth(x, sigma=3):
     y = sp.ndimage.filters.gaussian_filter(x, [sigma, sigma], mode='constant')
